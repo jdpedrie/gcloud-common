@@ -98,6 +98,12 @@ var (
 	// tests for Create and Set
 	createSetTests = []writeTest{
 		{
+			suffix:  "empty",
+			desc:    "creating or setting an empty map",
+			inData:  `{}`,
+			outData: mp(),
+		},
+		{
 			suffix:  "nosplit",
 			desc:    "don’t split on dots", // go/set-update #1
 			comment: `Create and Set treat their map keys literally. They do not split on dots.`,
@@ -210,6 +216,18 @@ operation has no map, just an update mask.`,
 			precond: existsTruePrecondition,
 			isErr:   true,
 		},
+		{
+			suffix: "st-alone",
+			desc:   "ServerTimestamp alone",
+			comment: `If the only values in the input are ServerTimestamps, then no
+update operation should be produced.`,
+			inData:        `{"a": "ServerTimestamp"}`,
+			paths:         [][]string{{"a"}},
+			values:        []string{`"ServerTimestamp"`},
+			outData:       nil,
+			maskForUpdate: nil,
+			transform:     []string{"a"},
+		},
 	}
 
 	serverTimestampTests = []writeTest{
@@ -226,18 +244,6 @@ special ServerTimestamp value.`,
 			outData:       mp("a", 1),
 			maskForUpdate: []string{"a"},
 			transform:     []string{"b"},
-		},
-		{
-			suffix: "st-alone",
-			desc:   "ServerTimestamp alone",
-			comment: `If the only values in the input are ServerTimestamps, then no
-update operation should be produced unless there are preconditions.`,
-			inData:        `{"a": "ServerTimestamp"}`,
-			paths:         [][]string{{"a"}},
-			values:        []string{`"ServerTimestamp"`},
-			outData:       nil,
-			maskForUpdate: nil,
-			transform:     []string{"a"},
 		},
 		{
 			suffix: "st-nested",
@@ -353,6 +359,18 @@ func genCreate(binw io.Writer) {
 	tests = append(tests, createSetTests...)
 	tests = append(tests, serverTimestampTests...)
 	tests = append(tests, sentinelErrorTests...)
+	tests = append(tests, writeTest{
+		suffix: "st-alone",
+		desc:   "ServerTimestamp alone",
+		comment: `If the only values in the input are ServerTimestamps, then no
+update operation should be produced.`,
+		inData:        `{"a": "ServerTimestamp"}`,
+		paths:         [][]string{{"a"}},
+		values:        []string{`"ServerTimestamp"`},
+		outData:       nil,
+		maskForUpdate: nil,
+		transform:     []string{"a"},
+	})
 
 	precond := &fspb.Precondition{
 		ConditionType: &fspb.Precondition_Exists{false},
@@ -382,6 +400,18 @@ func genSet(binw io.Writer) {
 	tests = append(tests, serverTimestampTests...)
 	tests = append(tests, sentinelErrorTests...)
 	tests = append(tests, []writeTest{
+		{
+			suffix: "st-alone",
+			desc:   "ServerTimestamp alone",
+			comment: `If the only values in the input are ServerTimestamps, then
+an update operation with an empty map should be produced.`,
+			inData:        `{"a": "ServerTimestamp"}`,
+			paths:         [][]string{{"a"}},
+			values:        []string{`"ServerTimestamp"`},
+			outData:       mp(),
+			maskForUpdate: nil,
+			transform:     []string{"a"},
+		},
 		{
 			suffix:  "mergeall",
 			desc:    "MergeAll",
@@ -452,6 +482,19 @@ transforms.`,
 			transform: []string{"b"},
 		},
 		{
+			suffix: "st-alone-mergeall",
+			desc:   "ServerTimestamp alone with MergeAll",
+			comment: `If the only values in the input are ServerTimestamps, then no
+update operation should be produced.`,
+			inData:        `{"a": "ServerTimestamp"}`,
+			opt:           mergeAllOption,
+			paths:         [][]string{{"a"}},
+			values:        []string{`"ServerTimestamp"`},
+			outData:       nil,
+			maskForUpdate: nil,
+			transform:     []string{"a"},
+		},
+		{
 			suffix: "st-merge-both",
 			desc:   "ServerTimestamp with Merge of both fields",
 			inData: `{"a": 1, "b": "ServerTimestamp"}`,
@@ -502,6 +545,15 @@ bug.`,
 			opt:    mergeOption([]string{"a"}),
 			isErr:  true,
 		},
+		{
+			suffix: "mergeall-empty",
+			desc:   "MergeAll cannot be specified with empty data.",
+			comment: `It makes no sense to specify MergeAll and provide no data, so we
+disallow it on the client.`,
+			inData: `{}`,
+			opt:    mergeAllOption,
+			isErr:  true,
+		},
 	}...)
 
 	for _, test := range tests {
@@ -542,6 +594,14 @@ func genUpdate(binw io.Writer) {
 			inData:  `{"a.b.c": 1}`,
 			outData: mp("a", mp("b", mp("c", 1))),
 			mask:    []string{"a.b.c"},
+		},
+		{
+			suffix:  "quoting",
+			desc:    "non-letter starting chars are quoted, except underscore",
+			comment: `In a field path, any component beginning with a non-letter or underscore is quoted.`,
+			inData:  `{"_0.1.+2": 1}`,
+			outData: mp("_0", mp("1", mp("+2", 1))),
+			mask:    []string{"_0.`1`.`+2`"},
 		},
 		{
 			suffix: "split-top-level", // go/set-update #6
