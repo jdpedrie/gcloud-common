@@ -18,13 +18,12 @@ import (
 	"flag"
 	"fmt"
 	"go/doc"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
-	tpb "cloud.google.com/go/firestore/genproto"
+	tpb "github.com/GoogleCloudPlatform/google-cloud-common/testing/firestore/genproto"
 	"github.com/golang/protobuf/proto"
 	tspb "github.com/golang/protobuf/ptypes/timestamp"
 	fspb "google.golang.org/genproto/googleapis/firestore/v1beta1"
@@ -336,33 +335,32 @@ func main() {
 	if *outputDir == "" {
 		log.Fatal("-o required")
 	}
-	binf, err := os.Create(filepath.Join(*outputDir, "tests.binprotos"))
-	if err != nil {
+	suite := &tpb.TestSuite{}
+	genGet(suite)
+	genCreate(suite)
+	genSet(suite)
+	genUpdate(suite)
+	genUpdatePaths(suite)
+	genDelete(suite)
+	if err := writeProtoToFile(filepath.Join(*outputDir, "test-suite.binproto"), suite); err != nil {
 		log.Fatal(err)
-	}
-	genGet(binf)
-	genCreate(binf)
-	genSet(binf)
-	genUpdate(binf)
-	genUpdatePaths(binf)
-	genDelete(binf)
-	if err := binf.Close(); err != nil {
-		log.Fatalf("closing binary file: %v", err)
 	}
 	fmt.Printf("wrote %d tests to %s\n", nTests, *outputDir)
 }
 
-func genGet(binw io.Writer) {
-	outputTest("get-basic", "A call to DocumentRef.Get.", binw, &tpb.Test{
+func genGet(suite *tpb.TestSuite) {
+	tp := &tpb.Test{
 		Description: "get: get a document",
 		Test: &tpb.Test_Get{&tpb.GetTest{
 			DocRefPath: docPath,
 			Request:    &fspb.GetDocumentRequest{Name: docPath},
 		}},
-	})
+	}
+	suite.Tests = append(suite.Tests, tp)
+	outputTestText("get-basic", "A call to DocumentRef.Get.", tp)
 }
 
-func genCreate(binw io.Writer) {
+func genCreate(suite *tpb.TestSuite) {
 	var tests []writeTest
 	tests = append(tests, basicTests...)
 	tests = append(tests, createSetTests...)
@@ -398,11 +396,12 @@ update operation should be produced.`,
 				IsError:    test.isErr,
 			}},
 		}
-		outputTest(fmt.Sprintf("create-%s", test.suffix), test.comment, binw, tp)
+		suite.Tests = append(suite.Tests, tp)
+		outputTestText(fmt.Sprintf("create-%s", test.suffix), test.comment, tp)
 	}
 
 }
-func genSet(binw io.Writer) {
+func genSet(suite *tpb.TestSuite) {
 	var tests []writeTest
 	tests = append(tests, basicTests...)
 	tests = append(tests, createSetTests...)
@@ -584,12 +583,12 @@ disallow it on the client.`,
 				IsError:    test.isErr,
 			}},
 		}
-
-		outputTest(fmt.Sprintf("set-%s", test.suffix), test.comment, binw, tp)
+		suite.Tests = append(suite.Tests, tp)
+		outputTestText(fmt.Sprintf("set-%s", test.suffix), test.comment, tp)
 	}
 }
 
-func genUpdate(binw io.Writer) {
+func genUpdate(suite *tpb.TestSuite) {
 	var tests []writeTest
 	tests = append(tests, basicTests...)
 	tests = append(tests, updateTests...)
@@ -665,11 +664,12 @@ An update operation is produced just to hold the precondition.`,
 		if test.commentForUpdate != "" {
 			comment += "\n\n" + test.commentForUpdate
 		}
-		outputTest(fmt.Sprintf("update-%s", test.suffix), comment, binw, tp)
+		suite.Tests = append(suite.Tests, tp)
+		outputTestText(fmt.Sprintf("update-%s", test.suffix), comment, tp)
 	}
 }
 
-func genUpdatePaths(binw io.Writer) {
+func genUpdatePaths(suite *tpb.TestSuite) {
 	var tests []writeTest
 	tests = append(tests, basicTests...)
 	tests = append(tests, updateTests...)
@@ -742,11 +742,12 @@ Each FieldPath is a sequence of uninterpreted path components.`,
 		if test.commentForUpdate != "" {
 			comment += "\n\n" + test.commentForUpdate
 		}
-		outputTest(fmt.Sprintf("update-paths-%s", test.suffix), test.comment, binw, tp)
+		suite.Tests = append(suite.Tests, tp)
+		outputTestText(fmt.Sprintf("update-paths-%s", test.suffix), test.comment, tp)
 	}
 }
 
-func genDelete(binw io.Writer) {
+func genDelete(suite *tpb.TestSuite) {
 	for _, test := range []struct {
 		suffix  string
 		desc    string
@@ -792,7 +793,8 @@ func genDelete(binw io.Writer) {
 				IsError:      test.isErr,
 			}},
 		}
-		outputTest(fmt.Sprintf("delete-%s", test.suffix), test.comment, binw, tp)
+		suite.Tests = append(suite.Tests, tp)
+		outputTestText(fmt.Sprintf("delete-%s", test.suffix), test.comment, tp)
 	}
 }
 
@@ -873,7 +875,7 @@ func toFieldPaths(fps [][]string) []*tpb.FieldPath {
 
 var filenames = map[string]bool{}
 
-func outputTest(filename, comment string, binw io.Writer, t *tpb.Test) {
+func outputTestText(filename, comment string, t *tpb.Test) {
 	if strings.HasSuffix(filename, "-") {
 		log.Fatalf("test %q missing suffix", t.Description)
 	}
@@ -885,13 +887,13 @@ func outputTest(filename, comment string, binw io.Writer, t *tpb.Test) {
 	}
 	filenames[filename] = true
 	basename := filepath.Join(*outputDir, filename+".textproto")
-	if err := writeTestToFile(basename, comment, binw, t); err != nil {
+	if err := writeTestToFile(basename, comment, t); err != nil {
 		log.Fatalf("writing test: %v", err)
 	}
 	nTests++
 }
 
-func writeTestToFile(pathname, comment string, binw io.Writer, t *tpb.Test) (err error) {
+func writeTestToFile(pathname, comment string, t *tpb.Test) (err error) {
 	f, err := os.Create(pathname)
 	if err != nil {
 		return err
@@ -908,19 +910,25 @@ func writeTestToFile(pathname, comment string, binw io.Writer, t *tpb.Test) (err
 	fmt.Fprintln(f)
 	doc.ToText(f, comment, "# ", "#    ", 80)
 	fmt.Fprintln(f)
-	if err := proto.MarshalText(f, t); err != nil {
-		return err
-	}
+	return proto.MarshalText(f, t)
+}
 
-	// Write binary protos to a single file, each preceded by its length as a varint.
-	bytes, err := proto.Marshal(t)
+func writeProtoToFile(filename string, p proto.Message) (err error) {
+	f, err := os.Create(filename)
 	if err != nil {
 		return err
 	}
-	if _, err = binw.Write(proto.EncodeVarint(uint64(len(bytes)))); err != nil {
+	defer func() {
+		err2 := f.Close()
+		if err == nil {
+			err = err2
+		}
+	}()
+	bytes, err := proto.Marshal(p)
+	if err != nil {
 		return err
 	}
-	_, err = binw.Write(bytes)
+	_, err = f.Write(bytes)
 	return err
 }
 
