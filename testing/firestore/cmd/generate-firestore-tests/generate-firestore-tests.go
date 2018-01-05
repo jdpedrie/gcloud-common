@@ -463,9 +463,9 @@ Only fields mentioned in the option are present in the update operation.`,
 			desc:   "Merge field is not a leaf",
 			comment: `If a field path is in a merge option, the value at that path
 replaces the stored value. That is true even if the value is complex.`,
-			inData:  `{"h": {"g": 5, "f": 6}, "e": 7}`,
+			inData:  `{"h": {"f": 5, "g": 6}, "e": 7}`,
 			opt:     mergeOption([]string{"h"}),
-			outData: mp("h", mp("g", 5, "f", 6)),
+			outData: mp("h", mp("f", 5, "g", 6)),
 			mask:    []string{"h"},
 		},
 		{
@@ -525,13 +525,64 @@ then it is pruned from the data but does not result in a transform.`,
 			mask:    []string{"a"},
 		},
 		{
-			suffix: "merge-nowrite",
+			suffix: "st-merge-nowrite",
 			desc:   "If no ordinary values in Merge, no write",
 			comment: `If all the fields in the merge option have ServerTimestamp
 values, then no update operation is produced, only a transform.`,
 			inData:    `{"a": 1, "b": "ServerTimestamp"}`,
 			opt:       mergeOption([]string{"b"}),
 			transform: []string{"b"},
+		},
+		{
+			suffix: "st-merge-nonleaf",
+			desc:   "non-leaf merge field with ServerTimestamp",
+			comment: `If a field path is in a merge option, the value at that path
+replaces the stored value, and ServerTimestamps inside that value become transforms
+as usual.`,
+			inData:    `{"h": {"f": 5, "g": "ServerTimestamp"}, "e": 7}`,
+			opt:       mergeOption([]string{"h"}),
+			outData:   mp("h", mp("f", 5)),
+			mask:      []string{"h"},
+			transform: []string{"h.g"},
+		},
+		{
+			suffix: "st-merge-nonleaf-alone",
+			desc:   "non-leaf merge field with ServerTimestamp alone",
+			comment: `If a field path is in a merge option, the value at that path
+replaces the stored value. If the value has only ServerTimestamps, they become transforms
+and we clear the value by including the field path in the update mask.`,
+			inData:    `{"h": {"g": "ServerTimestamp"}, "e": 7}`,
+			opt:       mergeOption([]string{"h"}),
+			mask:      []string{"h"},
+			transform: []string{"h.g"},
+		},
+		{
+			suffix:  "del-mergeall",
+			desc:    "Delete with MergeAll",
+			comment: "A Delete sentinel can appear with a mergeAll option.",
+			inData:  `{"a": 1, "b": {"c": "Delete"}}`,
+			opt:     mergeAllOption,
+			outData: mp("a", 1),
+			mask:    []string{"a", "b.c"},
+		},
+		{
+			suffix:  "del-merge",
+			desc:    "Delete with merge",
+			comment: "A Delete sentinel can appear with a merge option.",
+			inData:  `{"a": 1, "b": {"c": "Delete"}}`,
+			opt:     mergeOption([]string{"a"}, []string{"b", "c"}),
+			outData: mp("a", 1),
+			mask:    []string{"a", "b.c"},
+		},
+		{
+			suffix: "del-merge-alone",
+			desc:   "Delete with merge",
+			comment: `A Delete sentinel can appear with a merge option. If the delete
+paths are the only ones to be merged, then no document is sent, just an update mask.`,
+			inData:  `{"a": 1, "b": {"c": "Delete"}}`,
+			opt:     mergeOption([]string{"b", "c"}),
+			outData: nil,
+			mask:    []string{"b.c"},
 		},
 		// Errors:
 		{
@@ -541,6 +592,14 @@ values, then no update operation is produced, only a transform.`,
 that is not in the input data.`,
 			inData: `{"a": 1}`,
 			opt:    mergeOption([]string{"b"}, []string{"a"}),
+			isErr:  true,
+		},
+		{
+			suffix: "del-wo-merge",
+			desc:   "Delete cannot appear unless a merge option is specified",
+			comment: `Without a merge option, Set replaces the document with the input
+data. A Delete sentinel in the data makes no sense in this case.`,
+			inData: `{"a": 1, "b": "Delete"}`,
 			isErr:  true,
 		},
 		{
@@ -554,12 +613,32 @@ bug.`,
 			isErr:  true,
 		},
 		{
+			suffix: "del-nonleaf",
+			desc:   "Delete cannot appear as part of a merge path",
+			comment: `If a Delete is part of the value at a merge path, then the user is
+confused: their merge path says "replace this entire value" but their Delete says
+"delete this part of the value". This should be an error, just as if they specified Delete
+in a Set with no merge.`,
+			inData: `{"h": {"g": "Delete"}}`,
+			opt:    mergeOption([]string{"h"}),
+			isErr:  true,
+		},
+		{
 			suffix: "mergeall-empty",
 			desc:   "MergeAll cannot be specified with empty data.",
 			comment: `It makes no sense to specify MergeAll and provide no data, so we
 disallow it on the client.`,
 			inData: `{}`,
 			opt:    mergeAllOption,
+			isErr:  true,
+		},
+		{
+			suffix: "merge-prefix",
+			desc:   "One merge path cannot be the prefix of another",
+			comment: `The prefix would make the other path meaningless, so this is
+probably a programming error.`,
+			inData: `{"a": {"b": 1}}`,
+			opt:    mergeOption([]string{"a"}, []string{"a", "b"}),
 			isErr:  true,
 		},
 	}...)
