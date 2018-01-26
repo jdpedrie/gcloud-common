@@ -26,12 +26,14 @@ import (
 	tpb "github.com/GoogleCloudPlatform/google-cloud-common/testing/firestore/genproto"
 	"github.com/golang/protobuf/proto"
 	tspb "github.com/golang/protobuf/ptypes/timestamp"
+	"github.com/golang/protobuf/ptypes/wrappers"
 	fspb "google.golang.org/genproto/googleapis/firestore/v1beta1"
 )
 
 const (
 	database = "projects/projectID/databases/(default)"
-	docPath  = database + "/documents/C/d"
+	collPath = database + "/documents/C"
+	docPath  = collPath + "/d"
 )
 
 var outputDir = flag.String("o", "", "directory to write test files")
@@ -342,6 +344,7 @@ func main() {
 	genUpdate(suite)
 	genUpdatePaths(suite)
 	genDelete(suite)
+	genQuery(suite)
 	if err := writeProtoToFile(filepath.Join(*outputDir, "test-suite.binproto"), suite); err != nil {
 		log.Fatal(err)
 	}
@@ -944,12 +947,532 @@ func mergeOption(paths ...[]string) *tpb.SetOption {
 	return &tpb.SetOption{Fields: toFieldPaths(paths)}
 }
 
+// A queryTest describes a series of function calls to create a Query.
+type queryTest struct {
+	suffix  string                // textproto filename suffix
+	desc    string                // short description
+	comment string                // detailed explanation (comment in textproto file)
+	clauses []interface{}         // the query clauses (corresponding to function calls)
+	query   *fspb.StructuredQuery // the desired proto
+	isErr   bool                  // arguments result in a client-side error
+}
+
+func genQuery(suite *tpb.TestSuite) {
+	docsnap := &tpb.Cursor{
+		DocSnapshot: &tpb.DocSnapshot{
+			Path:     collPath + "/D",
+			JsonData: `{"a": 7, "b": 8}`,
+		},
+	}
+	badDocsnap := &tpb.Cursor{
+		DocSnapshot: &tpb.DocSnapshot{
+			Path:     database + "/documents/C2/D",
+			JsonData: `{"a": 7, "b": 8}`,
+		},
+	}
+	docsnapRef := refval(collPath + "/D")
+	for _, test := range []queryTest{
+		{
+			suffix:  "select-empty",
+			desc:    "empty Select clause",
+			comment: `An empty Select clause selects just the document ID.`,
+			clauses: []interface{}{&tpb.Select{[]*tpb.FieldPath{}}},
+			query: &fspb.StructuredQuery{
+				Select: &fspb.StructuredQuery_Projection{
+					Fields: []*fspb.StructuredQuery_FieldReference{{"__name__"}},
+				},
+			},
+		},
+		{
+			suffix:  "select",
+			desc:    "Select clause with some fields",
+			comment: `An ordinary Select clause.`,
+			clauses: []interface{}{
+				&tpb.Select{[]*tpb.FieldPath{fp("a"), fp("b")}},
+			},
+			query: &fspb.StructuredQuery{
+				Select: &fspb.StructuredQuery_Projection{
+					Fields: []*fspb.StructuredQuery_FieldReference{{"a"}, {"b"}},
+				},
+			},
+		},
+		{
+			suffix:  "select-last-wins",
+			desc:    "two Select clauses",
+			comment: `The last Select clause is the only one used.`,
+			clauses: []interface{}{
+				&tpb.Select{[]*tpb.FieldPath{fp("a"), fp("b")}},
+				&tpb.Select{[]*tpb.FieldPath{fp("c")}},
+			},
+			query: &fspb.StructuredQuery{
+				Select: &fspb.StructuredQuery_Projection{
+					Fields: []*fspb.StructuredQuery_FieldReference{{"c"}},
+				},
+			},
+		},
+		{
+			suffix:  "where",
+			desc:    "Where clause",
+			comment: `A simple Where clause.`,
+			clauses: []interface{}{
+				&tpb.Where{Path: fp("a"), Op: ">", JsonValue: `5`},
+			},
+			query: &fspb.StructuredQuery{
+				Where: filter("a", fspb.StructuredQuery_FieldFilter_GREATER_THAN, 5),
+			},
+		},
+		{
+			suffix:  "where-2",
+			desc:    "two Where clauses",
+			comment: `Multiple Where clauses are combined into a composite filter.`,
+			clauses: []interface{}{
+				&tpb.Where{Path: fp("a"), Op: ">=", JsonValue: `5`},
+				&tpb.Where{Path: fp("b"), Op: "<", JsonValue: `"foo"`},
+			},
+			query: &fspb.StructuredQuery{
+				Where: &fspb.StructuredQuery_Filter{
+					&fspb.StructuredQuery_Filter_CompositeFilter{
+						&fspb.StructuredQuery_CompositeFilter{
+							Op: fspb.StructuredQuery_CompositeFilter_AND,
+							Filters: []*fspb.StructuredQuery_Filter{
+								filter("a", fspb.StructuredQuery_FieldFilter_GREATER_THAN_OR_EQUAL, 5),
+								filter("b", fspb.StructuredQuery_FieldFilter_LESS_THAN, "foo"),
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			suffix:  "offset-limit",
+			desc:    "Offset and Limit clauses",
+			comment: `Offset and Limit clauses.`,
+			clauses: []interface{}{&tpb.Clause_Offset{2}, &tpb.Clause_Limit{3}},
+			query: &fspb.StructuredQuery{
+				Offset: 2,
+				Limit:  &wrappers.Int32Value{3},
+			},
+		},
+		{
+			suffix:  "offset-limit-last-wins",
+			desc:    "multiple Offset and Limit clauses",
+			comment: `With multiple Offset or Limit clauses, the last one wins.`,
+			clauses: []interface{}{
+				&tpb.Clause_Offset{2},
+				&tpb.Clause_Limit{3},
+				&tpb.Clause_Limit{4},
+				&tpb.Clause_Offset{5},
+			},
+			query: &fspb.StructuredQuery{
+				Offset: 5,
+				Limit:  &wrappers.Int32Value{4},
+			},
+		},
+		{
+			suffix:  "order",
+			desc:    "basic OrderBy clauses",
+			comment: `Multiple OrderBy clauses combine.`,
+			clauses: []interface{}{
+				&tpb.OrderBy{fp("b"), "asc"},
+				&tpb.OrderBy{fp("a"), "desc"},
+			},
+			query: &fspb.StructuredQuery{
+				OrderBy: []*fspb.StructuredQuery_Order{
+					{fref("b"), fspb.StructuredQuery_ASCENDING},
+					{fref("a"), fspb.StructuredQuery_DESCENDING},
+				},
+			},
+		},
+		{
+			suffix:  "cursor-vals-1a",
+			desc:    "StartAt/EndBefore with values",
+			comment: `Cursor methods take the same number of values as there are OrderBy clauses.`,
+			clauses: []interface{}{
+				&tpb.OrderBy{fp("a"), "asc"},
+				&tpb.Clause_StartAt{&tpb.Cursor{JsonValues: []string{`7`}}},
+				&tpb.Clause_EndBefore{&tpb.Cursor{JsonValues: []string{`9`}}},
+			},
+			query: &fspb.StructuredQuery{
+				OrderBy: []*fspb.StructuredQuery_Order{
+					{fref("a"), fspb.StructuredQuery_ASCENDING},
+				},
+				StartAt: &fspb.Cursor{Values: []*fspb.Value{val(7)}, Before: true},
+				EndAt:   &fspb.Cursor{Values: []*fspb.Value{val(9)}, Before: true},
+			},
+		},
+		{
+			suffix:  "cursor-vals-1b",
+			desc:    "StartAfter/EndAt with values",
+			comment: `Cursor methods take the same number of values as there are OrderBy clauses.`,
+			clauses: []interface{}{
+				&tpb.OrderBy{fp("a"), "asc"},
+				&tpb.Clause_StartAfter{&tpb.Cursor{JsonValues: []string{`7`}}},
+				&tpb.Clause_EndAt{&tpb.Cursor{JsonValues: []string{`9`}}},
+			},
+			query: &fspb.StructuredQuery{
+				OrderBy: []*fspb.StructuredQuery_Order{
+					{fref("a"), fspb.StructuredQuery_ASCENDING},
+				},
+				StartAt: &fspb.Cursor{Values: []*fspb.Value{val(7)}, Before: false},
+				EndAt:   &fspb.Cursor{Values: []*fspb.Value{val(9)}, Before: false},
+			},
+		},
+		{
+			suffix:  "cursor-vals-2",
+			desc:    "Start/End with two values",
+			comment: `Cursor methods take the same number of values as there are OrderBy clauses.`,
+			clauses: []interface{}{
+				&tpb.OrderBy{fp("a"), "asc"},
+				&tpb.OrderBy{fp("b"), "desc"},
+				&tpb.Clause_StartAt{&tpb.Cursor{JsonValues: []string{`7`, `8`}}},
+				&tpb.Clause_EndAt{&tpb.Cursor{JsonValues: []string{`9`, `10`}}},
+			},
+			query: &fspb.StructuredQuery{
+				OrderBy: []*fspb.StructuredQuery_Order{
+					{fref("a"), fspb.StructuredQuery_ASCENDING},
+					{fref("b"), fspb.StructuredQuery_DESCENDING},
+				},
+				StartAt: &fspb.Cursor{Values: []*fspb.Value{val(7), val(8)}, Before: true},
+				EndAt:   &fspb.Cursor{Values: []*fspb.Value{val(9), val(10)}, Before: false},
+			},
+		},
+		{
+			suffix: "cursor-vals-docid",
+			desc:   "cursor methods with __name__",
+			comment: `Cursor values corresponding to a __name__ field take the document path relative to the
+query's collection.`,
+			clauses: []interface{}{
+				&tpb.OrderBy{fp("__name__"), "asc"},
+				&tpb.Clause_StartAfter{&tpb.Cursor{JsonValues: []string{`"D1"`}}},
+				&tpb.Clause_EndBefore{&tpb.Cursor{JsonValues: []string{`"D2"`}}},
+			},
+			query: &fspb.StructuredQuery{
+				OrderBy: []*fspb.StructuredQuery_Order{
+					{fref("__name__"), fspb.StructuredQuery_ASCENDING},
+				},
+				StartAt: &fspb.Cursor{
+					Values: []*fspb.Value{refval(collPath + "/D1")},
+					Before: false,
+				},
+				EndAt: &fspb.Cursor{
+					Values: []*fspb.Value{refval(collPath + "/D2")},
+					Before: true,
+				},
+			},
+		},
+		{
+			suffix:  "cursor-vals-last-wins",
+			desc:    "cursor methods, last one wins",
+			comment: `When multiple Start* or End* calls occur, the values of the last one are used.`,
+			clauses: []interface{}{
+				&tpb.OrderBy{fp("a"), "asc"},
+				&tpb.Clause_StartAfter{&tpb.Cursor{JsonValues: []string{`1`}}},
+				&tpb.Clause_StartAt{&tpb.Cursor{JsonValues: []string{`2`}}},
+				&tpb.Clause_EndAt{&tpb.Cursor{JsonValues: []string{`3`}}},
+				&tpb.Clause_EndBefore{&tpb.Cursor{JsonValues: []string{`4`}}},
+			},
+			query: &fspb.StructuredQuery{
+				OrderBy: []*fspb.StructuredQuery_Order{
+					{fref("a"), fspb.StructuredQuery_ASCENDING},
+				},
+				StartAt: &fspb.Cursor{
+					Values: []*fspb.Value{val(2)},
+					Before: true,
+				},
+				EndAt: &fspb.Cursor{
+					Values: []*fspb.Value{val(4)},
+					Before: true,
+				},
+			},
+		},
+		{
+			suffix:  "cursor-docsnap",
+			desc:    "cursor methods with a document snapshot",
+			comment: `When a document snapshot is used, the client appends a __name__ order-by clause.`,
+			clauses: []interface{}{
+				&tpb.Clause_StartAt{docsnap},
+			},
+			query: &fspb.StructuredQuery{
+				OrderBy: []*fspb.StructuredQuery_Order{
+					{fref("__name__"), fspb.StructuredQuery_ASCENDING},
+				},
+				StartAt: &fspb.Cursor{
+					Values: []*fspb.Value{docsnapRef},
+					Before: true,
+				},
+			},
+		},
+		{
+			suffix: "cursor-docsnap-order",
+			desc:   "cursor methods with a document snapshot, existing orderBy",
+			comment: `When a document snapshot is used, the client appends a __name__ order-by clause
+with the direction of the last order-by clause.`,
+			clauses: []interface{}{
+				&tpb.OrderBy{fp("a"), "asc"},
+				&tpb.OrderBy{fp("b"), "desc"},
+				&tpb.Clause_StartAfter{docsnap},
+			},
+			query: &fspb.StructuredQuery{
+				OrderBy: []*fspb.StructuredQuery_Order{
+					{fref("a"), fspb.StructuredQuery_ASCENDING},
+					{fref("b"), fspb.StructuredQuery_DESCENDING},
+					{fref("__name__"), fspb.StructuredQuery_DESCENDING},
+				},
+				StartAt: &fspb.Cursor{
+					Values: []*fspb.Value{val(7), val(8), docsnapRef},
+					Before: false,
+				},
+			},
+		},
+		{
+			suffix:  "cursor-docsnap-where-eq",
+			desc:    "cursor methods with a document snapshot and an equality where clause",
+			comment: `A Where clause using equality doesn't change the implicit orderBy clauses.`,
+			clauses: []interface{}{
+				&tpb.Where{Path: fp("a"), Op: "==", JsonValue: `3`},
+				&tpb.Clause_EndAt{docsnap},
+			},
+			query: &fspb.StructuredQuery{
+				Where: filter("a", fspb.StructuredQuery_FieldFilter_EQUAL, 3),
+				OrderBy: []*fspb.StructuredQuery_Order{
+					{fref("__name__"), fspb.StructuredQuery_ASCENDING},
+				},
+				EndAt: &fspb.Cursor{
+					Values: []*fspb.Value{docsnapRef},
+					Before: false,
+				},
+			},
+		},
+		{
+			suffix: "cursor-docsnap-where-neq",
+			desc:   "cursor method with a document snapshot and an inequality where clause",
+			comment: `A Where clause with an inequality results in an OrderBy clause
+on that clause's path, if there are no other OrderBy clauses.`,
+			clauses: []interface{}{
+				&tpb.Where{Path: fp("a"), Op: "<=", JsonValue: `3`},
+				&tpb.Clause_EndBefore{docsnap},
+			},
+			query: &fspb.StructuredQuery{
+				Where: filter("a", fspb.StructuredQuery_FieldFilter_LESS_THAN_OR_EQUAL, 3),
+				OrderBy: []*fspb.StructuredQuery_Order{
+					{fref("a"), fspb.StructuredQuery_ASCENDING},
+					{fref("__name__"), fspb.StructuredQuery_ASCENDING},
+				},
+				EndAt: &fspb.Cursor{
+					Values: []*fspb.Value{val(7), docsnapRef},
+					Before: true,
+				},
+			},
+		},
+		{
+			suffix: "cursor-docsnap-where-neq-orderby",
+			desc:   "cursor method, doc snapshot, inequality where clause, and existing orderBy clause",
+			comment: `If there is an OrderBy clause, the inequality Where clause does
+not result in a new OrderBy clause. We still add a __name__ OrderBy clause`,
+			clauses: []interface{}{
+				&tpb.OrderBy{fp("a"), "desc"},
+				&tpb.Where{Path: fp("a"), Op: "<", JsonValue: `4`},
+				&tpb.Clause_StartAt{docsnap},
+			},
+			query: &fspb.StructuredQuery{
+				Where: filter("a", fspb.StructuredQuery_FieldFilter_LESS_THAN, 4),
+				OrderBy: []*fspb.StructuredQuery_Order{
+					{fref("a"), fspb.StructuredQuery_DESCENDING},
+					{fref("__name__"), fspb.StructuredQuery_DESCENDING},
+				},
+				StartAt: &fspb.Cursor{
+					Values: []*fspb.Value{val(7), docsnapRef},
+					Before: true,
+				},
+			},
+		},
+		{
+			suffix: "cursor-docsnap-orderby-name",
+			desc:   "cursor method, doc snapshot, existing orderBy __name__",
+			comment: `If there is an existing orderBy clause on __name__,
+no changes are made to the list of orderBy clauses.`,
+			clauses: []interface{}{
+				&tpb.OrderBy{fp("a"), "desc"},
+				&tpb.OrderBy{fp("__name__"), "asc"},
+				&tpb.Clause_StartAt{docsnap},
+				&tpb.Clause_EndAt{docsnap},
+			},
+			query: &fspb.StructuredQuery{
+				OrderBy: []*fspb.StructuredQuery_Order{
+					{fref("a"), fspb.StructuredQuery_DESCENDING},
+					{fref("__name__"), fspb.StructuredQuery_ASCENDING},
+				},
+				StartAt: &fspb.Cursor{
+					Values: []*fspb.Value{val(7), docsnapRef},
+					Before: true,
+				},
+				EndAt: &fspb.Cursor{
+					Values: []*fspb.Value{val(7), docsnapRef},
+					Before: false,
+				},
+			},
+		},
+		// Errors
+		{
+			suffix:  "invalid-operator",
+			desc:    "invalid operator in Where clause",
+			comment: "The !=  operator is not supported.",
+			clauses: []interface{}{
+				&tpb.Where{Path: fp("a"), Op: "!=", JsonValue: `4`},
+			},
+			isErr: true,
+		},
+		{
+			suffix:  "invalid-path-select",
+			desc:    "invalid path in Where clause",
+			comment: "The path has an empty component.",
+			clauses: []interface{}{
+				&tpb.Select{[]*tpb.FieldPath{{[]string{"*", ""}}}},
+			},
+			isErr: true,
+		},
+		{
+			suffix:  "invalid-path-where",
+			desc:    "invalid path in Where clause",
+			comment: "The path has an empty component.",
+			clauses: []interface{}{
+				&tpb.Where{Path: &tpb.FieldPath{[]string{"*", ""}}, Op: "==", JsonValue: `4`},
+			},
+			isErr: true,
+		},
+		{
+			suffix:  "invalid-path-order",
+			desc:    "invalid path in OrderBy clause",
+			comment: "The path has an empty component.",
+			clauses: []interface{}{
+				&tpb.OrderBy{&tpb.FieldPath{[]string{"*", ""}}, "asc"},
+			},
+			isErr: true,
+		},
+		{
+			suffix: "cursor-no-order",
+			desc:   "cursor method without orderBy",
+			comment: `If a cursor method with a list of values is provided, there must be at least as many
+explicit orderBy clauses as values.`,
+			clauses: []interface{}{
+				&tpb.Clause_StartAt{&tpb.Cursor{JsonValues: []string{`2`}}},
+			},
+			isErr: true,
+		},
+		{
+			suffix:  "st-where",
+			desc:    "ServerTimestamp in Where",
+			comment: `Sentinel values are not permitted in queries.`,
+			clauses: []interface{}{
+				&tpb.Where{fp("a"), "==", `"ServerTimestamp"`},
+			},
+			isErr: true,
+		},
+		{
+			suffix:  "del-where",
+			desc:    "Delete in Where",
+			comment: `Sentinel values are not permitted in queries.`,
+			clauses: []interface{}{
+				&tpb.Where{fp("a"), "==", `"Delete"`},
+			},
+			isErr: true,
+		},
+		{
+			suffix:  "st-cursor",
+			desc:    "ServerTimestamp in cursor method",
+			comment: `Sentinel values are not permitted in queries.`,
+			clauses: []interface{}{
+				&tpb.OrderBy{fp("a"), "asc"},
+				&tpb.Clause_EndBefore{&tpb.Cursor{JsonValues: []string{`"ServerTimestamp"`}}},
+			},
+			isErr: true,
+		},
+		{
+			suffix:  "del-cursor",
+			desc:    "Delete in cursor method",
+			comment: `Sentinel values are not permitted in queries.`,
+			clauses: []interface{}{
+				&tpb.OrderBy{fp("a"), "asc"},
+				&tpb.Clause_EndBefore{&tpb.Cursor{JsonValues: []string{`"Delete"`}}},
+			},
+			isErr: true,
+		},
+		{
+			suffix: "wrong-collection",
+			desc:   "doc snapshot with wrong collection in cursor method",
+			comment: `If a document snapshot is passed to a Start*/End* method, it must be in the
+same collection as the query.`,
+			clauses: []interface{}{
+				&tpb.Clause_EndBefore{badDocsnap},
+			},
+			isErr: true,
+		},
+	} {
+		var tclauses []*tpb.Clause
+		for _, c := range test.clauses {
+			tclauses = append(tclauses, toClause(c))
+		}
+		query := test.query
+		if query != nil {
+			query.From = []*fspb.StructuredQuery_CollectionSelector{{CollectionId: "C"}}
+		}
+		tp := &tpb.Test{
+			Description: "query: " + test.desc,
+			Test: &tpb.Test_Query{&tpb.QueryTest{
+				CollPath: collPath,
+				Clauses:  tclauses,
+				Query:    query,
+				IsError:  test.isErr,
+			}},
+		}
+		suite.Tests = append(suite.Tests, tp)
+		outputTestText(fmt.Sprintf("query-%s", test.suffix), test.comment, tp)
+	}
+}
+
+func toClause(m interface{}) *tpb.Clause {
+	switch c := m.(type) {
+	case *tpb.Select:
+		return &tpb.Clause{&tpb.Clause_Select{c}}
+	case *tpb.Where:
+		return &tpb.Clause{&tpb.Clause_Where{c}}
+	case *tpb.OrderBy:
+		return &tpb.Clause{&tpb.Clause_OrderBy{c}}
+	case *tpb.Clause_Offset:
+		return &tpb.Clause{c}
+	case *tpb.Clause_Limit:
+		return &tpb.Clause{c}
+	case *tpb.Clause_StartAt:
+		return &tpb.Clause{c}
+	case *tpb.Clause_StartAfter:
+		return &tpb.Clause{c}
+	case *tpb.Clause_EndAt:
+		return &tpb.Clause{c}
+	case *tpb.Clause_EndBefore:
+		return &tpb.Clause{c}
+	default:
+		panic("unknown clause type")
+	}
+}
+
 func toFieldPaths(fps [][]string) []*tpb.FieldPath {
 	var ps []*tpb.FieldPath
 	for _, fp := range fps {
 		ps = append(ps, &tpb.FieldPath{fp})
 	}
 	return ps
+}
+
+func filter(field string, op fspb.StructuredQuery_FieldFilter_Operator, v interface{}) *fspb.StructuredQuery_Filter {
+	return &fspb.StructuredQuery_Filter{
+		&fspb.StructuredQuery_Filter_FieldFilter{
+			&fspb.StructuredQuery_FieldFilter{
+				Field: fref(field),
+				Op:    op,
+				Value: val(v),
+			},
+		},
+	}
 }
 
 var filenames = map[string]bool{}
@@ -1044,4 +1567,16 @@ func val(a interface{}) *fspb.Value {
 		log.Fatalf("val: bad type: %T", a)
 		return nil
 	}
+}
+
+func refval(path string) *fspb.Value {
+	return &fspb.Value{&fspb.Value_ReferenceValue{path}}
+}
+
+func fp(s string) *tpb.FieldPath {
+	return &tpb.FieldPath{[]string{s}}
+}
+
+func fref(s string) *fspb.StructuredQuery_FieldReference {
+	return &fspb.StructuredQuery_FieldReference{s}
 }

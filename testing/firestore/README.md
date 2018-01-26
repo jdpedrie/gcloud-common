@@ -7,8 +7,8 @@ following the standard client specification.
 
 - `testdata`: the tests.
    - `*.textproto`: a single test in text proto format.
-   - `tests.binprotos`: all the tests in a single file. The protos are in binary
-      format, each preceded by its length encoded as a varint.
+   - `test-suite.binprotos`: all the tests in a single file, containing a single
+     TestSuite proto.
 
 - `cmd/generate-firestore-tests/generate-firestore-tests.go`: the Go program that generates the tests.
 
