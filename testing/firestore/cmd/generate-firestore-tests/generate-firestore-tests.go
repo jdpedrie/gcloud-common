@@ -789,7 +789,7 @@ Each FieldPath is a sequence of uninterpreted path components.`,
 		{
 			suffix:  "fp-del", // see https://github.com/googleapis/nodejs-firestore/pull/119
 			desc:    "field paths with delete",
-			comment: `One one nested field is deleted, and another isn't, preserve the second.`,
+			comment: `If one nested field is deleted, and another isn't, preserve the second.`,
 			paths:   [][]string{{"foo", "bar"}, {"foo", "delete"}},
 			values:  []string{`1`, `"Delete"`},
 			outData: mp("foo", mp("bar", 1)),
